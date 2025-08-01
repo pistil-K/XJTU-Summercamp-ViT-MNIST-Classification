@@ -68,11 +68,17 @@ class MultiHeadAttention(object):
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         
-        # Q, K, V 投影矩阵
+        # Q, K, V 投影矩阵，使用较小的初始化范围
         self.q_proj = L.Linear(embed_dim, embed_dim)
         self.k_proj = L.Linear(embed_dim, embed_dim)
         self.v_proj = L.Linear(embed_dim, embed_dim)
         self.out_proj = L.Linear(embed_dim, embed_dim)
+        
+        # 缩放初始权重
+        self.q_proj.weight *= 0.1
+        self.k_proj.weight *= 0.1
+        self.v_proj.weight *= 0.1
+        self.out_proj.weight *= 0.1
         
     def forward(self, x):
         # 输入: (B, N, C) = (64, 16, 64)
@@ -93,10 +99,14 @@ class MultiHeadAttention(object):
         k = k.transpose(0, 2, 1, 3)  # (64, 8, 16, 8)
         v = v.transpose(0, 2, 1, 3)  # (64, 8, 16, 8)
         
-        # 计算注意力
-        attn = np.matmul(q, k.transpose(0, 1, 3, 2)) / sqrt(self.head_dim)  # (64, 8, 16, 16)
-        attn = np.exp(attn - np.max(attn, axis=-1, keepdims=True))
-        attn = attn / (np.sum(attn, axis=-1, keepdims=True) + 1e-6)
+        # 计算注意力，使用更大的缩放因子
+        scale = np.sqrt(self.head_dim) * 2
+        attn = np.matmul(q, k.transpose(0, 1, 3, 2)) / scale  # (64, 8, 16, 16)
+        
+        # 使用更稳定的softmax实现
+        attn_max = np.max(attn, axis=-1, keepdims=True)
+        exp_attn = np.exp(attn - attn_max)
+        attn = exp_attn / (np.sum(exp_attn, axis=-1, keepdims=True) + 1e-6)
         
         # 应用注意力
         out = np.matmul(attn, v)  # (64, 8, 16, 8)
@@ -109,6 +119,10 @@ class MultiHeadAttention(object):
         out = out.reshape(B * N, C)  # (1024, 64)
         out = self.out_proj.forward(out)  # (1024, 64)
         out = out.reshape(B, N, C)  # (64, 16, 64)
+        
+        # 值范围检查
+        if np.abs(out).max() > 10:
+            out = out * (10 / np.abs(out).max())
         
         # 保存中间结果用于反向传播
         self.attn = attn
@@ -163,23 +177,51 @@ class MultiHeadAttention(object):
 
 class MLP(object):
     def __init__(self, in_features, hidden_features, out_features):
+        # 使用更小的初始化范围
         self.fc1 = L.Linear(in_features, hidden_features)
         self.act = L.ReLU()
         self.fc2 = L.Linear(hidden_features, out_features)
         
+        # 缩放初始权重
+        self.fc1.weight *= 0.1
+        self.fc2.weight *= 0.1
+        
     def forward(self, x):
+        # 添加值范围检查
+        if np.abs(x).max() > 10:
+            x = x * (10 / np.abs(x).max())
+            
         x = self.fc1.forward(x)
         x = self.act.forward(x)
+        
+        # ReLU后也检查范围
+        if np.abs(x).max() > 10:
+            x = x * (10 / np.abs(x).max())
+            
         x = self.fc2.forward(x)
+        
+        # 输出前最后检查一次范围
+        if np.abs(x).max() > 10:
+            x = x * (10 / np.abs(x).max())
+            
         return x
         
     def backward(self, grad_output):
+        # 梯度裁剪
+        if np.abs(grad_output).max() > 10:
+            grad_output = grad_output * (10 / np.abs(grad_output).max())
+            
         # 反向传播
         grad_output, grad_fc2_w, grad_fc2_b = self.fc2.backward(grad_output)
         grad_output = self.act.backward(grad_output)
         grad_output, grad_fc1_w, grad_fc1_b = self.fc1.backward(grad_output)
         
-        # 返回元组
+        # 裁剪梯度
+        grad_fc1_w = np.clip(grad_fc1_w, -1, 1)
+        grad_fc1_b = np.clip(grad_fc1_b, -1, 1)
+        grad_fc2_w = np.clip(grad_fc2_w, -1, 1)
+        grad_fc2_b = np.clip(grad_fc2_b, -1, 1)
+        
         return grad_output, (grad_fc1_w, grad_fc1_b, grad_fc2_w, grad_fc2_b)
 
 class TransformerBlock(object):
@@ -199,7 +241,8 @@ class TransformerBlock(object):
         
         # 注意力层
         attn_out = self.attn.forward(x)  # (B, N, C)
-        x = attn_out + identity
+        # 残差连接时进行缩放
+        x = attn_out * 0.5 + identity * 0.5  # 使用加权和而不是直接相加
         
         # 第二个残差连接
         identity = x
@@ -209,7 +252,12 @@ class TransformerBlock(object):
         x_2d = x.reshape(-1, C)  # (B*N, C)
         mlp_out = self.mlp.forward(x_2d)  # (B*N, C)
         mlp_out = mlp_out.reshape(B, N, C)  # 恢复3D形状
-        x = mlp_out + identity
+        # 残差连接时进行缩放
+        x = mlp_out * 0.5 + identity * 0.5
+        
+        # 值范围检查
+        if np.abs(x).max() > 10:
+            x = x * (10 / np.abs(x).max())
         
         return x
         

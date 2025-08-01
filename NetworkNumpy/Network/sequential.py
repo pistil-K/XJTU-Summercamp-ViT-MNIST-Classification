@@ -42,7 +42,7 @@ class Sequential(object):
             
         for l in reversed(self.layers):
             # 打印当前层和梯度形状，用于调试
-            print(f"Layer: {type(l).__name__}, Gradient shape: {grad.shape}")
+            # print(f"Layer: {type(l).__name__}, Gradient shape: {grad.shape}")
             
             bwd_ret = l.backward(grad)
             if isinstance(bwd_ret, tuple):
