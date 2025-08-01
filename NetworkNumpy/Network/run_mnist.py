@@ -13,8 +13,12 @@ os.makedirs(RESULT_PATH, exist_ok=True)
 EPOCHS = 15
 BATCH_SIZE = 64
 
-LR = 5e-5  # 降低学习率
-MOMENTUM = 0.9
+LR = 1e-4  # 降低学习率
+MOMENTUM = 0.9  # 保持动量不变
+
+# 添加学习率预热
+WARMUP_EPOCHS = 2
+warmup_factor = lambda epoch: min(1.0, (epoch + 1) / WARMUP_EPOCHS)
 
 # Import the necessary libraries
 import numpy as np
@@ -82,6 +86,11 @@ for e in range(EPOCHS):
     running_loss = 0
     print("Epoch: {:03d}/{:03d}..".format(e+1, EPOCHS))
 
+    # 更新学习率
+    current_lr = LR * warmup_factor(e)
+    optimizer.lr = current_lr
+    print(f"Current learning rate: {current_lr:.6f}")
+
     # Training pass
     print("Training pass:")
     for data in (tbar := tqdm(trainloader, total=len(trainloader))):
@@ -89,12 +98,24 @@ for e in range(EPOCHS):
 
         prob, loss = model.forward(images, labels, train_mode=True)
         model.backward(loss)
-        optimizer.step()
         
-        totloss = sum(loss)
-        running_loss += totloss
+        # 梯度裁剪
+        for layer_grads in model.param_grads:
+            if layer_grads:  # 如果有梯度
+                for grad in layer_grads:
+                    if grad is not None:
+                        # 计算梯度范数
+                        grad_norm = np.sqrt(np.sum(grad ** 2))
+                        if grad_norm > 1.0:  # 如果梯度范数大于阈值
+                            grad *= 1.0 / grad_norm  # 裁剪梯度
+        
+        optimizer.step()
+        running_loss += np.mean(loss)  # 对loss取平均
 
-        tbar.set_description("Running loss {:.2f}".format(totloss))
+        # 计算当前batch的准确率和平均损失
+        batch_acc = np.mean((np.argmax(prob, axis=1) == labels).astype(float))
+        batch_loss = np.mean(loss)
+        tbar.set_description(f"Loss: {batch_loss:.3f}, Acc: {batch_acc:.3f}")
     
     # Testing pass
     print("Validation pass:")
@@ -104,7 +125,7 @@ for e in range(EPOCHS):
         images, labels = data[0].numpy(), data[1].numpy()
         
         prob, loss = model.forward(images, labels, train_mode=False)
-        test_loss += np.sum(loss)
+        test_loss += np.mean(loss)  # 对loss取平均
         
         top_class = np.argmax(prob, axis=1)
         equals = (top_class == labels)

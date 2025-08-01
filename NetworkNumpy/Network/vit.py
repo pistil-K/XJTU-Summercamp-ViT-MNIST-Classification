@@ -68,17 +68,25 @@ class MultiHeadAttention(object):
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         
-        # Q, K, V 投影矩阵，使用较小的初始化范围
+        # Q, K, V 投影矩阵，使用Xavier初始化
+        scale = np.sqrt(2.0 / (embed_dim + embed_dim))  # Xavier初始化
         self.q_proj = L.Linear(embed_dim, embed_dim)
         self.k_proj = L.Linear(embed_dim, embed_dim)
         self.v_proj = L.Linear(embed_dim, embed_dim)
         self.out_proj = L.Linear(embed_dim, embed_dim)
         
         # 缩放初始权重
-        self.q_proj.weight *= 0.1
-        self.k_proj.weight *= 0.1
-        self.v_proj.weight *= 0.1
-        self.out_proj.weight *= 0.1
+        self.q_proj.weight *= scale
+        self.k_proj.weight *= scale
+        self.v_proj.weight *= scale
+        self.out_proj.weight *= scale
+        
+        # 初始化为接近单位矩阵
+        eye = np.eye(embed_dim)
+        self.q_proj.weight += eye * 0.1
+        self.k_proj.weight += eye * 0.1
+        self.v_proj.weight += eye * 0.1
+        self.out_proj.weight += eye * 0.1
         
     def forward(self, x):
         # 输入: (B, N, C) = (64, 16, 64)
@@ -344,15 +352,57 @@ class ViT(Sequential):  # 改回继承Sequential
         # Patch Embedding
         layers.append(PatchEmbedding(img_size, patch_size, in_channels, embed_dim))
         
+        # 添加位置编码
+        pos_embed = np.zeros((1, self.num_patches, embed_dim))
+        for i in range(self.num_patches):
+            for j in range(embed_dim):
+                pos_embed[0, i, j] = np.sin(i / 10000 ** (2 * j / embed_dim)) if j % 2 == 0 else np.cos(i / 10000 ** (2 * (j-1) / embed_dim))
+        self.pos_embed = pos_embed
+        
         # Transformer Encoder
         for _ in range(depth):
             layers.append(TransformerBlock(embed_dim, num_heads, mlp_ratio))
         
         # 分类头：使用全局平均池化
-        layers.extend([
-            GlobalAveragePooling(),  # (B, N, C) -> (B, C)
-            L.Linear(embed_dim, num_classes),  # (B, C) -> (B, num_classes)
-            L.CrossEntropyLossWithSoftmax()
-        ])
+        layers.append(GlobalAveragePooling())  # (B, N, C) -> (B, C)
         
-        super().__init__(layers)  # 调用父类构造函数 
+        # 最后的线性层使用特殊初始化
+        final_linear = L.Linear(embed_dim, num_classes)
+        # 使用较大的初始化范围
+        scale = np.sqrt(2.0 / embed_dim) * 5.0  # 增大5倍
+        final_linear.weight = np.random.randn(embed_dim, num_classes).astype(np.float32) * scale
+        # 初始化偏置为非零值，打破对称性
+        final_linear.bias = np.random.randn(num_classes).astype(np.float32) * 0.1
+        layers.append(final_linear)
+        
+        # 损失层
+        layers.append(L.CrossEntropyLossWithSoftmax())
+        
+        super().__init__(layers)  # 调用父类构造函数
+        
+    def forward(self, input, gt_label, train_mode=True):
+        x = input
+        # forward the layers except the last one
+        for i, l in enumerate(self.layers[:-2]):  # 除了最后两层
+            # 在第一层之后添加位置编码
+            if i == 0:
+                x = l.forward(x)
+                x = x + self.pos_embed
+            else:
+                if hasattr(l, 'train_mode'):  # 检查是否有train_mode参数
+                    x = l.forward(x, train_mode)
+                else:
+                    x = l.forward(x)
+        
+        # 最后的线性层
+        x = self.layers[-2].forward(x)
+        # 添加BN层来规范化最后的输出
+        x = (x - np.mean(x, axis=1, keepdims=True)) / (np.std(x, axis=1, keepdims=True) + 1e-5)
+        x = x * 1.0  # 缩放因子
+        
+        print(f"\nFinal linear layer output range: min={x.min():.4f}, max={x.max():.4f}")
+        print(f"Example logits:\n{x[0]}")
+        
+        # 损失层
+        loss = self.layers[-1].forward(x, gt_label)
+        return self.layers[-1].prob, loss 

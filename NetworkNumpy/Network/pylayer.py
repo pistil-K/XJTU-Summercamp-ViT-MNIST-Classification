@@ -22,9 +22,10 @@ class Linear(object):
         self.init_param()
 
     def init_param(self):
-        # 使用He初始化
+        # 使用更大的初始化范围，特别是对于最后一层
         scale = np.sqrt(2.0 / self.input_channel)
         self.weight = np.random.randn(self.input_channel, self.output_channel).astype(np.float32) * scale
+        # 对于分类问题，偏置初始化为0
         self.bias = np.zeros(self.output_channel).astype(np.float32)
 
     '''
@@ -258,6 +259,10 @@ class CrossEntropyLossWithSoftmax(object):
         pass
 
     def forward(self, input, gt_label):
+        # 添加温度系数使softmax更"尖锐"
+        temperature = 10.0
+        input = input * temperature
+        
         # 数值稳定性：减去最大值
         input_shifted = input - np.max(input, axis=-1, keepdims=True)
         exp = np.exp(input_shifted)
@@ -271,6 +276,11 @@ class CrossEntropyLossWithSoftmax(object):
         log_term = np.log(sum_exp).squeeze()  # (N,)
         class_scores = input_shifted[np.arange(input.shape[0]), gt_label]  # (N,)
         output = -class_scores + log_term
+        
+        # 保存温度系数用于反向传播
+        self.temperature = temperature
+        
+        # 返回每个样本的损失
         return output
 
     def backward(self, grad_output):
@@ -283,8 +293,9 @@ class CrossEntropyLossWithSoftmax(object):
         # 对应真实标签的位置减1
         grad_input[np.arange(grad_input.shape[0]), self.gt_label] -= 1
         
-        # 乘以上游梯度
-        grad_input = grad_output * grad_input  # (N, C)
+        # 乘以上游梯度和温度系数，并除以batch size以归一化
+        batch_size = grad_input.shape[0]
+        grad_input = grad_output * grad_input * self.temperature / batch_size
         
         return grad_input
 
