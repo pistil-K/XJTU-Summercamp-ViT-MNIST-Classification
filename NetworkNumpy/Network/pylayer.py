@@ -22,8 +22,10 @@ class Linear(object):
         self.init_param()
 
     def init_param(self):
-        self.weight = (np.random.randn(self.input_channel,self.output_channel) * sqrt(2.0/(self.input_channel+self.output_channel))).astype(np.float32)
-        self.bias = np.zeros((self.output_channel))
+        # 使用He初始化
+        scale = np.sqrt(2.0 / self.input_channel)
+        self.weight = np.random.randn(self.input_channel, self.output_channel).astype(np.float32) * scale
+        self.bias = np.zeros(self.output_channel).astype(np.float32)
 
     '''
         Forward computation of linear layer, you may want to save some intermediate
@@ -36,9 +38,14 @@ class Linear(object):
     '''
     def forward(self, input):
         self.input = input
-        ##################################################
-        # TODO: YOUR CODE HERE: forward
-        ##################################################
+        # 检查输入是否包含nan
+        if np.isnan(input).any():
+            print(f"Warning: NaN detected in Linear input, shape: {input.shape}")
+            
+        # 数值稳定性：检查输入范围
+        if np.abs(input).max() > 1e3:
+            print(f"Warning: Large values detected in Linear input: {np.abs(input).max()}")
+            
         output = np.dot(input, self.weight) + self.bias
         return output
 
@@ -56,12 +63,24 @@ class Linear(object):
             grad_bias --  numpy array of shape (output_channel), gradient w.r.t bias
     '''
     def backward(self, grad_input):
-        ##################################################
-        # TODO: YOUR CODE HERE: backward
-        ##################################################        
+        # 检查输入梯度是否包含nan
+        if np.isnan(grad_input).any():
+            print(f"Warning: NaN detected in Linear gradient input, shape: {grad_input.shape}")
+            
+        # 确保梯度输入是2D的
+        if grad_input.ndim == 1:
+            grad_input = grad_input.reshape(-1, 1)
+            
         grad_bias = np.sum(grad_input, axis=0)
         grad_weight = np.dot(self.input.T, grad_input)
         grad_output = np.dot(grad_input, self.weight.T)
+        
+        # 梯度裁剪
+        clip_threshold = 1.0
+        grad_output = np.clip(grad_output, -clip_threshold, clip_threshold)
+        grad_weight = np.clip(grad_weight, -clip_threshold, clip_threshold)
+        grad_bias = np.clip(grad_bias, -clip_threshold, clip_threshold)
+        
         return grad_output, grad_weight, grad_bias
 
 '''
@@ -106,20 +125,9 @@ class BatchNorm1d(object):
         self.r_mean = np.zeros((self.input_channel)).astype(np.float32)
         self.r_var = np.ones((self.input_channel)).astype(np.float32)
         self.beta = np.zeros((self.input_channel)).astype(np.float32)
-        self.gamma = (np.random.rand(self.input_channel) * sqrt(2.0/(self.input_channel))).astype(np.float32)
-    '''
-        Forward computation of batch normalization layer and momentumly updated the running mean and running variance
-        You may want to save some intermediate variables to class membership (self.) and you should take care of different behaviors
-        during training and testing.
-
-        Arguments:
-            input -- numpy array (N, input_channel)
-            train -- bool, boolean indicator to specify the running mode, True for training and False for testing
-    '''
+        self.gamma = np.ones((self.input_channel)).astype(np.float32)  # 初始化为1而不是随机值
+        
     def forward(self, input, train):
-        ##########################################################################
-        # TODO: YOUR CODE HERE
-        ##########################################################################
         orig_shape = input.shape
         if len(orig_shape) == 3:
             # 如果是3D输入 (B, L, C)，将其reshape为2D (B*L, C)
@@ -128,27 +136,27 @@ class BatchNorm1d(object):
         self.input = input
         if train:
             # 计算均值和方差
-            mu = np.mean(input, axis=0)
-            var = np.var(input, axis=0)
+            mu = np.mean(input, axis=0, keepdims=True)  # (1, C)
+            var = np.var(input, axis=0, keepdims=True) + self.eps  # (1, C)
             
             # 保存用于反向传播
             self.mu = mu
             self.var = var
             
             # 更新running mean和running variance
-            self.r_mean = self.momentum * self.r_mean + (1 - self.momentum) * mu
-            self.r_var = self.momentum * self.r_var + (1 - self.momentum) * var
+            self.r_mean = self.momentum * self.r_mean + (1 - self.momentum) * mu.squeeze()
+            self.r_var = self.momentum * self.r_var + (1 - self.momentum) * var.squeeze()
             
             # 标准化
-            x_norm = (input - mu) / np.sqrt(var + self.eps)
+            x_norm = (input - mu) / np.sqrt(var)  # (B*L, C)
             self.x_norm = x_norm
             
             # 缩放和平移
-            output = self.gamma * x_norm + self.beta
+            output = self.gamma[None, :] * x_norm + self.beta[None, :]  # (B*L, C)
         else:
             # 测试时使用running statistics
-            x_norm = (input - self.r_mean) / np.sqrt(self.r_var + self.eps)
-            output = self.gamma * x_norm + self.beta
+            x_norm = (input - self.r_mean[None, :]) / np.sqrt(self.r_var[None, :])  # (B*L, C)
+            output = self.gamma[None, :] * x_norm + self.beta[None, :]  # (B*L, C)
             
         # 如果是3D输入，恢复原始形状
         if len(orig_shape) == 3:
@@ -157,9 +165,6 @@ class BatchNorm1d(object):
         return output
 
     def backward(self, grad_output):
-        ##########################################################################
-        # TODO: YOUR CODE HERE
-        ##########################################################################
         orig_shape = grad_output.shape
         if len(orig_shape) == 3:
             # 如果是3D梯度 (B, L, C)，将其reshape为2D (B*L, C)
@@ -169,24 +174,24 @@ class BatchNorm1d(object):
         N = self.input.shape[0]
         
         # 计算beta和gamma的梯度
-        grad_beta = np.sum(grad_output, axis=0)
-        grad_gamma = np.sum(grad_output * self.x_norm, axis=0)
+        grad_beta = np.sum(grad_output, axis=0)  # (C,)
+        grad_gamma = np.sum(grad_output * self.x_norm, axis=0)  # (C,)
         
         # 计算标准化输入的梯度
-        grad_x_norm = grad_output * self.gamma
+        grad_x_norm = grad_output * self.gamma[None, :]  # (B*L, C)
         
         # 计算方差的梯度
         grad_var = np.sum(grad_x_norm * (self.input - self.mu) * -0.5 * 
-                         (self.var + self.eps)**(-1.5), axis=0)
+                         (self.var)**(-1.5), axis=0)  # (C,)
         
         # 计算均值的梯度
-        grad_mu = np.sum(grad_x_norm * -1/np.sqrt(self.var + self.eps), axis=0) + \
-                 grad_var * np.mean(-2 * (self.input - self.mu), axis=0)
+        grad_mu = np.sum(grad_x_norm * -1/np.sqrt(self.var), axis=0) + \
+                 grad_var * np.mean(-2 * (self.input - self.mu), axis=0)  # (C,)
         
         # 计算输入的梯度
-        grad_input = grad_x_norm / np.sqrt(self.var + self.eps) + \
-                    grad_var * 2 * (self.input - self.mu) / N + \
-                    grad_mu / N
+        grad_input = grad_x_norm / np.sqrt(self.var) + \
+                    grad_var[None, :] * 2 * (self.input - self.mu) / N + \
+                    grad_mu[None, :] / N  # (B*L, C)
                     
         # 如果是3D梯度，恢复原始形状
         if len(orig_shape) == 3:
@@ -251,35 +256,37 @@ class ReLU(object):
 class CrossEntropyLossWithSoftmax(object):
     def __init__(self):
         pass
-    '''
-        Forward computation of cross entropy with softmax, you may want to save some intermediate variables to class membership (self.)
-        Arguments:
-            input    -- numpy array of shape (N, C), the prediction for each class, where C is number of class
-            gt_label -- numpy array of shape (N), it's a integer array and the value range from 0 to C-1 which
-                        specify the ground truth class for each input
-        Output:
-            output   -- numpy array of shape (N), containing the cross entropy loss on each input
-    '''
+
     def forward(self, input, gt_label):
-        exp = np.exp(input)
+        # 数值稳定性：减去最大值
+        input_shifted = input - np.max(input, axis=-1, keepdims=True)
+        exp = np.exp(input_shifted)
         self.gt_label = gt_label
-        self.prob = exp / np.sum(exp, axis = -1)[:,None]
-        log_term = np.log(np.sum(exp, axis = -1))
-        output = -input[np.arange(input.shape[0]), gt_label] + log_term
+        
+        # 计算softmax概率
+        sum_exp = np.sum(exp, axis=-1, keepdims=True)  # (N, 1)
+        self.prob = exp / sum_exp  # (N, C)
+        
+        # 计算交叉熵损失
+        log_term = np.log(sum_exp).squeeze()  # (N,)
+        class_scores = input_shifted[np.arange(input.shape[0]), gt_label]  # (N,)
+        output = -class_scores + log_term
         return output
 
-    '''
-        Backward computation of cross entropy with softmax. It's recommended to resue the variable
-        in forward computation to simplify the formula.
-        Arguments:
-            grad_output -- numpy array of shape (N)
-
-        Output:
-            output   -- numpy array of shape (N, C), the gradient w.r.t input of forward function
-    '''
     def backward(self, grad_output):
-        self.prob[np.arange(self.prob.shape[0]),self.gt_label] -= 1
-        return grad_output[:,None] * self.prob
+        # grad_output shape: (N,)
+        grad_output = grad_output.reshape(-1, 1)  # (N, 1)
+        
+        # 复制概率分布
+        grad_input = self.prob.copy()  # (N, C)
+        
+        # 对应真实标签的位置减1
+        grad_input[np.arange(grad_input.shape[0]), self.gt_label] -= 1
+        
+        # 乘以上游梯度
+        grad_input = grad_output * grad_input  # (N, C)
+        
+        return grad_input
 
 def im2col(input_data, filter_h, filter_w, stride=1, pad=0):
     N, C, H, W = input_data.shape

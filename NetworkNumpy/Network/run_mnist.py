@@ -6,10 +6,14 @@ MODEL = 'ViT'
 DATASET_PATH = './data/'
 RESULT_PATH = './result_{}/'.format(MODEL)
 
+# 创建结果目录
+import os
+os.makedirs(RESULT_PATH, exist_ok=True)
+
 EPOCHS = 15
 BATCH_SIZE = 64
 
-LR = 1e-4  # 调整学习率
+LR = 5e-5  # 降低学习率
 MOMENTUM = 0.9
 
 # Import the necessary libraries
@@ -58,7 +62,7 @@ elif MODEL == 'ResNet18':
     LR = 5e-5
     model = resnet18(input_channel=1, output_class=10)
 elif MODEL == 'ViT':
-    LR = 1e-4  # ViT通常需要更大的学习率
+    # 删除这里的学习率设置，使用文件开头设置的值
     model = ViT(img_size=28, patch_size=7, in_channels=1, 
                embed_dim=64, num_heads=8, depth=6, 
                mlp_ratio=4., num_classes=10)

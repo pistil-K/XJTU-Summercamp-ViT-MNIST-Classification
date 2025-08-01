@@ -36,18 +36,27 @@ class Sequential(object):
 
     def backward(self, grad):
         grads = []
+        # 确保初始梯度是2D的
+        if grad.ndim == 1:
+            grad = grad.reshape(-1, 1)  # (N,) -> (N, 1)
+            
         for l in reversed(self.layers):
-            # print(grad.shape)
-            # print(type(l))
+            # 打印当前层和梯度形状，用于调试
+            print(f"Layer: {type(l).__name__}, Gradient shape: {grad.shape}")
+            
             bwd_ret = l.backward(grad)
             if isinstance(bwd_ret, tuple):
                 grad = bwd_ret[0]
                 if len(bwd_ret) > 1:  # have trainable params
-                    # 如果返回的是元组，将其转换为列表
                     grad_params = list(bwd_ret[1])
                     grads.append(grad_params)
             else:  # only grad_input
                 grad = bwd_ret
                 grads.append([])
+                
+            # 检查梯度是否包含nan
+            if np.isnan(grad).any():
+                print(f"Warning: NaN gradient detected in {type(l).__name__}")
+                
         grads.reverse()
         self.param_grads = grads

@@ -27,29 +27,35 @@ XJTU-Summercamp-ViT-MNIST-Classification/
 输入图像 (B=64, C=1, H=28, W=28)
 │
 ├─> PatchEmbedding
-│   └─> 分割patches: (64, 1, 28, 28) -> (64, 16, 49)  # 16个7x7的patches
+│   ├─> 分割patches: (64, 1, 28, 28) -> (64, 1, 4, 7, 4, 7)  # 4×4个7×7的patches
+│   ├─> 重排维度: (64, 4, 4, 7, 7, 1) -> (64, 16, 49)  # 16个patches，每个patch是49维
 │   └─> 线性投影: (64, 16, 49) -> (64, 16, 64)  # 投影到embed_dim维度
 │
 ├─> Transformer Encoder (x6)
 │   ├─> Multi-Head Attention
-│   │   ├─> Q,K,V投影: (64, 16, 64) -> 3x(64, 16, 64)
+│   │   ├─> Q,K,V投影: (64, 16, 64) -> 3个(64, 16, 64)
 │   │   ├─> 重塑多头: (64, 16, 64) -> (64, 8, 16, 8)  # 8个注意力头
-│   │   ├─> 注意力计算: (64, 8, 16, 16)
+│   │   ├─> 注意力计算: 
+│   │   │   ├─> Q × K^T: (64, 8, 16, 8) × (64, 8, 8, 16) -> (64, 8, 16, 16)
+│   │   │   ├─> Softmax: (64, 8, 16, 16) 
+│   │   │   └─> × V: (64, 8, 16, 16) × (64, 8, 16, 8) -> (64, 8, 16, 8)
 │   │   └─> 输出投影: (64, 16, 64)
 │   │
 │   ├─> BatchNorm1d
-│   │   └─> (64, 16, 64) -> (64, 16, 64)
+│   │   └─> (64, 16, 64) -> (64, 16, 64)  # 在特征维度上归一化
 │   │
 │   └─> MLP
-│       ├─> FC1: (64*16, 64) -> (64*16, 256)
+│       ├─> 重塑: (64, 16, 64) -> (1024, 64)  # 1024 = 64×16
+│       ├─> FC1: (1024, 64) -> (1024, 256)
 │       ├─> ReLU
-│       └─> FC2: (64*16, 256) -> (64*16, 64)
+│       ├─> FC2: (1024, 256) -> (1024, 64)
+│       └─> 重塑回: (64, 16, 64)
 │
 ├─> Global Average Pooling
-│   └─> (64, 16, 64) -> (64, 64)
+│   └─> (64, 16, 64) -> (64, 64)  # 在patch维度上平均
 │
 └─> 分类头
-    └─> Linear: (64, 64) -> (64, 10)
+    └─> Linear: (64, 64) -> (64, 10)  # 10个类别
 ```
 
 ### 2. 实现过程中的问题和解决方案
@@ -98,6 +104,51 @@ XJTU-Summercamp-ViT-MNIST-Classification/
           if len(bwd_ret) > 1:
               grad_params = list(bwd_ret[1])  # 将元组转换为列表
               grads.append(grad_params)
+  ```
+
+#### 问题5: 参数更新时的维度不匹配
+- **问题描述**: `Shape mismatch in sub: (49, 64) vs (64,)` 和 `Shape mismatch in sub: (64, 10) vs (10,)`
+- **原因**: 在优化器更新参数时，权重矩阵和偏置向量的维度不匹配
+- **分析**:
+  ```python
+  # PatchEmbedding层
+  weight.shape = (49, 64)  # 49 = 7×7 patches
+  bias.shape = (64,)      # 64维偏置向量
+
+  # 最后的Linear层
+  weight.shape = (64, 10)  # 64输入维度，10类别
+  bias.shape = (10,)      # 10维偏置向量
+  ```
+- **解决方案**: 
+  ```python
+  def list2d_sub(a, wa, b, wb):
+      for x, y in zip(a, b):
+          for u, v in zip(x, y):
+              if u.shape != v.shape:
+                  if len(u.shape) == 2 and len(v.shape) == 1 and u.shape[1] == v.shape[0]:
+                      # 对向量进行广播以匹配矩阵维度
+                      v_broadcasted = v[None, :].repeat(u.shape[0], axis=0)
+                      u *= wa
+                      u -= v_broadcasted * wb
+                  else:
+                      print(f"Incompatible shapes in sub: {u.shape} vs {v.shape}")
+  ```
+
+#### 问题6: Patch数量计算错误
+- **问题描述**: 最初假设有49个patches，实际上应该是16个
+- **原因**: 对于28×28的图像和7×7的patch大小，应该是4×4=16个patches
+- **分析**:
+  ```python
+  图像大小: 28 × 28
+  Patch大小: 7 × 7
+  Patch数量: (28 ÷ 7) × (28 ÷ 7) = 4 × 4 = 16
+  ```
+- **解决方案**: 
+  ```python
+  class PatchEmbedding:
+      def __init__(self, img_size=28, patch_size=7):
+          self.n_patches = (img_size // patch_size) ** 2  # 16 = 4×4
+          print(f"Creating PatchEmbedding with {self.n_patches} patches")
   ```
 
 ### 3. 关键数据结构
@@ -240,3 +291,34 @@ XJTU-Summercamp-ViT-MNIST-Classification/
 2. 修改`run_mnist.py`中的`MODEL`变量选择网络架构
 3. 运行`python run_mnist.py`开始训练
 4. 查看`result_{MODEL}/`目录下的训练结果和可视化图表
+
+### 7. 维度流详解
+
+#### PatchEmbedding层
+```
+输入: (B, C, H, W) = (64, 1, 28, 28)
+分patch: (B, C, 4, 7, 4, 7)  # 4×4个7×7的patches
+重排: (64, 16, 49)  # 16个patches，每个patch展平为49维
+投影: (64, 16, 64)  # 投影到64维嵌入空间
+```
+
+#### Transformer Block
+```
+输入: (64, 16, 64)
+Self-Attention:
+  - Q,K,V投影: 3 × (64, 16, 64)
+  - 多头重排: (64, 8, 16, 8)  # 8个注意力头
+  - 注意力计算: (64, 8, 16, 16)
+  - 输出: (64, 16, 64)
+MLP:
+  - 展平: (1024, 64)  # 1024 = 64×16
+  - FC1: (1024, 256)
+  - FC2: (1024, 64)
+  - 重塑: (64, 16, 64)
+```
+
+#### 分类头
+```
+Global Average Pooling: (64, 16, 64) -> (64, 64)
+Linear: (64, 64) -> (64, 10)
+```

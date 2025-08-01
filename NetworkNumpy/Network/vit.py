@@ -7,12 +7,14 @@ class PatchEmbedding(object):
     def __init__(self, img_size=28, patch_size=7, in_channels=1, embed_dim=64):
         self.img_size = img_size
         self.patch_size = patch_size
-        self.n_patches = (img_size // patch_size) ** 2
+        # 计算实际的patch数量：对于28x28的图像和7x7的patch，应该是4x4=16
+        self.n_patches = (img_size // patch_size) ** 2  # 16 = 4x4 patches
+        print(f"Creating PatchEmbedding with {self.n_patches} patches ({img_size//patch_size}x{img_size//patch_size})")
         self.embed_dim = embed_dim
         self.in_channels = in_channels
         
         # 计算每个patch的特征维度
-        self.patch_dim = in_channels * patch_size * patch_size
+        self.patch_dim = in_channels * patch_size * patch_size  # 1 * 7 * 7 = 49
         
         # 使用Linear层而不是Conv2d来实现patch embedding
         self.proj = L.Linear(self.patch_dim, embed_dim)
@@ -30,22 +32,28 @@ class PatchEmbedding(object):
         # 3. 合并patches维度并展平每个patch: -> (B, n_patches, patch_dim)
         x = x.reshape(B, self.n_patches, self.patch_dim)
         
+        # 保存输入形状用于反向传播
+        self.input_shape = x.shape  # 应该是 (B, 16, patch_dim)
+        
         # 线性投影到embed_dim
-        x = self.proj.forward(x.reshape(-1, self.patch_dim))  # (B*n_patches, embed_dim)
+        x_reshaped = x.reshape(-1, self.patch_dim)  # (B*n_patches, patch_dim)
+        x = self.proj.forward(x_reshaped)  # (B*n_patches, embed_dim)
         x = x.reshape(B, self.n_patches, self.embed_dim)  # (B, n_patches, embed_dim)
         
         return x
         
     def backward(self, grad_output):
-        B = grad_output.shape[0]
-        H = W = self.img_size
+        B, N, C = grad_output.shape
+        assert C == self.embed_dim, f"Gradient channels ({C}) doesn't match embed_dim ({self.embed_dim})"
+        assert N == self.n_patches, f"Gradient patches ({N}) doesn't match n_patches ({self.n_patches}), got shape {grad_output.shape}"
         
         # 线性层的反向传播
-        grad_output = grad_output.reshape(-1, self.embed_dim)  # (B*n_patches, embed_dim)
-        grad_output, grad_w, grad_b = self.proj.backward(grad_output)  # (B*n_patches, patch_dim)
+        grad_reshaped = grad_output.reshape(-1, self.embed_dim)  # (B*n_patches, embed_dim)
+        grad_output, grad_w, grad_b = self.proj.backward(grad_reshaped)  # (B*n_patches, patch_dim)
         grad_output = grad_output.reshape(B, self.n_patches, self.patch_dim)  # (B, n_patches, patch_dim)
         
         # 重建原始图像形状
+        H = W = self.img_size
         n_h = n_w = H // self.patch_size
         grad_output = grad_output.reshape(B, n_h, n_w, self.patch_size, self.patch_size, self.in_channels)
         grad_output = grad_output.transpose(0, 5, 1, 3, 2, 4)  # (B, C, n_h, patch_size, n_w, patch_size)
@@ -183,6 +191,7 @@ class TransformerBlock(object):
         
     def forward(self, x, train_mode=True):
         B, N, C = x.shape
+        assert N == 16, f"Expected 16 patches (4x4), got {N}"  # 验证patch数量
         
         # 第一个残差连接
         identity = x
@@ -199,21 +208,23 @@ class TransformerBlock(object):
         # MLP层
         x_2d = x.reshape(-1, C)  # (B*N, C)
         mlp_out = self.mlp.forward(x_2d)  # (B*N, C)
-        x = mlp_out.reshape(B, N, C) + identity
+        mlp_out = mlp_out.reshape(B, N, C)  # 恢复3D形状
+        x = mlp_out + identity
         
         return x
         
     def backward(self, grad_output):
         B, N, C = grad_output.shape
+        assert N == 16, f"Expected 16 patches in gradient, got {N}"  # 验证patch数量
         
         # 第二个残差连接的反向传播
         grad_mlp = grad_output
         grad_identity2 = grad_output
         
         # MLP的反向传播
-        grad_mlp = grad_mlp.reshape(-1, C)
+        grad_mlp = grad_mlp.reshape(-1, C)  # (B*N, C)
         grad_mlp, mlp_grads = self.mlp.backward(grad_mlp)
-        grad_mlp = grad_mlp.reshape(B, N, C)
+        grad_mlp = grad_mlp.reshape(B, N, C)  # 恢复3D形状
         
         # Norm2的反向传播
         grad_norm2, grad_norm2_g, grad_norm2_b = self.norm2.backward(grad_mlp)
@@ -228,6 +239,9 @@ class TransformerBlock(object):
         grad_norm1, grad_norm1_g, grad_norm1_b = self.norm1.backward(grad_attn)
         grad_output = grad_norm1 + grad_identity1
         
+        # 验证输出梯度形状
+        assert grad_output.shape == (B, N, C), f"Invalid gradient shape: {grad_output.shape}, expected: ({B}, {N}, {C})"
+        
         # 按照params_ref的结构组织梯度（展平的列表）
         grads = (
             *attn_grads,           # 8个梯度：Q,K,V,Out的weight和bias
@@ -239,16 +253,6 @@ class TransformerBlock(object):
         return grad_output, grads
 
 class GlobalAveragePooling(object):
-    '''
-        Global average pooling layer.
-        Takes average over all spatial dimensions.
-        
-        input tensor: (N, L, C) where:
-            N: batch size
-            L: sequence length (e.g. number of patches)
-            C: number of channels/features
-        output tensor: (N, C)
-    '''
     def __init__(self):
         pass
         
@@ -258,10 +262,25 @@ class GlobalAveragePooling(object):
         return np.mean(x, axis=1)  # (B, C)
         
     def backward(self, grad_output):
-        # grad_output: (B, C)
+        # grad_output: (B, C) or (B, C, 1)
         B, N, C = self.input_shape
+        
+        # 确保grad_output是2D的
+        if grad_output.ndim == 3:
+            grad_output = grad_output.squeeze(-1)
+            
+        # 检查形状
+        if grad_output.shape != (B, C):
+            print(f"Warning: Unexpected gradient shape in GlobalAveragePooling: {grad_output.shape}, expected: ({B}, {C})")
+            grad_output = grad_output.reshape(B, C)
+            
         # 将梯度平均分配给每个位置
-        return np.repeat(grad_output[:, np.newaxis, :], N, axis=1) / N  # (B, N, C)
+        grad_input = np.repeat(grad_output[:, np.newaxis, :], N, axis=1) / N  # (B, N, C)
+        
+        # 验证输出形状
+        assert grad_input.shape == (B, N, C), f"Invalid gradient shape: {grad_input.shape}, expected: ({B}, {N}, {C})"
+        
+        return grad_input
 
 class ViT(Sequential):  # 改回继承Sequential
     def __init__(self, img_size=28, patch_size=7, in_channels=1, embed_dim=64,

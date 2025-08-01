@@ -17,13 +17,19 @@ def list2d_add(a, wa, b, wb):
 
 def list2d_sub(a, wa, b, wb):
     for x, y in zip(a, b):
-        # print(len(x), len(y))
         for u, v in zip(x, y):
-            # print('\t', u.shape, v.shape)
+            # 处理广播情况
             if u.shape != v.shape:
-                print(f"Shape mismatch in sub: {u.shape} vs {v.shape}")
-            u *= wa
-            u -= v * wb
+                if len(u.shape) == 2 and len(v.shape) == 1 and u.shape[1] == v.shape[0]:
+                    # 如果是矩阵和向量的情况，对向量进行广播
+                    v_broadcasted = v[None, :].repeat(u.shape[0], axis=0)
+                    u *= wa
+                    u -= v_broadcasted * wb
+                else:
+                    print(f"Incompatible shapes in sub: {u.shape} vs {v.shape}")
+            else:
+                u *= wa
+                u -= v * wb
 
 class SGD(object):
     '''
