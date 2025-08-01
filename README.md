@@ -16,8 +16,131 @@ XJTU-Summercamp-ViT-MNIST-Classification/
         ├── lenet.py            # LeNet网络架构
         ├── alexnet.py          # AlexNet网络架构
         ├── resnet.py           # ResNet网络架构
+        ├── vit.py              # Vision Transformer实现
         └── checker.ipynb       # 测试验证脚本
 ```
+
+## Vision Transformer实现详解
+
+### 1. 网络架构和数据流
+```
+输入图像 (B=64, C=1, H=28, W=28)
+│
+├─> PatchEmbedding
+│   └─> 分割patches: (64, 1, 28, 28) -> (64, 16, 49)  # 16个7x7的patches
+│   └─> 线性投影: (64, 16, 49) -> (64, 16, 64)  # 投影到embed_dim维度
+│
+├─> Transformer Encoder (x6)
+│   ├─> Multi-Head Attention
+│   │   ├─> Q,K,V投影: (64, 16, 64) -> 3x(64, 16, 64)
+│   │   ├─> 重塑多头: (64, 16, 64) -> (64, 8, 16, 8)  # 8个注意力头
+│   │   ├─> 注意力计算: (64, 8, 16, 16)
+│   │   └─> 输出投影: (64, 16, 64)
+│   │
+│   ├─> BatchNorm1d
+│   │   └─> (64, 16, 64) -> (64, 16, 64)
+│   │
+│   └─> MLP
+│       ├─> FC1: (64*16, 64) -> (64*16, 256)
+│       ├─> ReLU
+│       └─> FC2: (64*16, 256) -> (64*16, 64)
+│
+├─> Global Average Pooling
+│   └─> (64, 16, 64) -> (64, 64)
+│
+└─> 分类头
+    └─> Linear: (64, 64) -> (64, 10)
+```
+
+### 2. 实现过程中的问题和解决方案
+
+#### 问题1: 循环导入
+- **问题描述**: `vit.py` 和 `pylayer.py` 之间存在循环导入
+- **原因**: 模块间相互依赖导致导入死锁
+- **解决方案**: 
+  ```python
+  # vit.py
+  import pylayer as L  # 直接导入基础层
+  from sequential import Sequential  # 导入Sequential类
+  ```
+
+#### 问题2: 维度不匹配
+- **问题描述**: `ValueError: shapes (1024,4096) and (64,64) not aligned`
+- **原因**: PatchEmbedding输出维度计算错误
+- **解决方案**: 
+  ```python
+  class PatchEmbedding:
+      def forward(self, x):
+          B, C, H, W = x.shape  # (64, 1, 28, 28)
+          x = x.reshape(B, C, H//patch_size, patch_size, W//patch_size, patch_size)
+          x = x.transpose(0, 2, 4, 3, 5, 1)  # 调整维度顺序
+          x = x.reshape(B, self.n_patches, -1)  # (64, 16, 49)
+  ```
+
+#### 问题3: 梯度结构不匹配（元组问题）
+- **问题描述**: `AttributeError: 'tuple' object has no attribute 'shape'`
+- **原因**: backward返回的梯度结构与params_ref不匹配
+- **解决方案**: 
+  ```python
+  class TransformerBlock:
+      def backward(self, grad_output):
+          # 返回扁平元组而不是嵌套结构
+          return grad_output, (grad_w1, grad_b1, grad_w2, grad_b2)
+  ```
+
+#### 问题4: 梯度收集问题
+- **问题描述**: `AttributeError: 'list' object has no attribute 'shape'`
+- **原因**: Sequential.backward中梯度收集方式不正确
+- **解决方案**: 
+  ```python
+  class Sequential:
+      def backward(self, grad):
+          if len(bwd_ret) > 1:
+              grad_params = list(bwd_ret[1])  # 将元组转换为列表
+              grads.append(grad_params)
+  ```
+
+### 3. 关键数据结构
+
+#### 参数引用结构 (params_ref)
+```python
+[
+    [weight1, bias1],     # 第一层参数
+    [weight2, bias2],     # 第二层参数
+    ...
+]
+```
+
+#### 梯度结构 (param_grads)
+```python
+[
+    [grad_w1, grad_b1],   # 第一层梯度
+    [grad_w2, grad_b2],   # 第二层梯度
+    ...
+]
+```
+
+### 4. 最佳实践和经验总结
+
+1. **维度处理**:
+   - 始终清晰记录每一层的输入输出维度
+   - 在关键位置添加维度检查和断言
+   - 注意batch维度的处理
+
+2. **梯度流**:
+   - 保持梯度结构与参数结构一致
+   - 注意梯度的累积和传播
+   - 正确处理残差连接
+
+3. **模块化设计**:
+   - 避免循环依赖
+   - 清晰的接口定义
+   - 一致的数据结构
+
+4. **调试技巧**:
+   - 使用print语句跟踪维度变化
+   - 添加shape断言检查
+   - 分段验证梯度计算
 
 ## 核心组件详细分析
 

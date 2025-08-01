@@ -39,8 +39,7 @@ class Linear(object):
         ##################################################
         # TODO: YOUR CODE HERE: forward
         ##################################################
-        # output = np.dot(self.input, self.weight)
-        output = np.einsum('Ni,io -> No', self.input, self.weight)
+        output = np.dot(input, self.weight) + self.bias
         return output
 
     '''
@@ -60,9 +59,9 @@ class Linear(object):
         ##################################################
         # TODO: YOUR CODE HERE: backward
         ##################################################        
-        grad_bias = np.einsum('No -> o', grad_input)
-        grad_weight = np.einsum('Ni,No -> io', self.input, grad_input)
-        grad_output = np.einsum('io,No -> Ni', self.weight, grad_input)
+        grad_bias = np.sum(grad_input, axis=0)
+        grad_weight = np.dot(self.input.T, grad_input)
+        grad_output = np.dot(grad_input, self.weight.T)
         return grad_output, grad_weight, grad_bias
 
 '''
@@ -121,47 +120,78 @@ class BatchNorm1d(object):
         ##########################################################################
         # TODO: YOUR CODE HERE
         ##########################################################################
+        orig_shape = input.shape
+        if len(orig_shape) == 3:
+            # 如果是3D输入 (B, L, C)，将其reshape为2D (B*L, C)
+            input = input.reshape(-1, self.input_channel)
+            
         self.input = input
         if train:
-            mu = np.mean(input, axis =0)
-            var = np.var(input, axis =0)
+            # 计算均值和方差
+            mu = np.mean(input, axis=0)
+            var = np.var(input, axis=0)
+            
+            # 保存用于反向传播
             self.mu = mu
             self.var = var
-            self.r_mean = self.r_mean * self.momentum + (1 - self.momentum) * mu
-            self.r_var = self.r_var * self.momentum + (1 - self.momentum) * var
-            self.input_norm = (input - mu[None,:]) / np.sqrt(var[None,:] + self.eps)
-            output = (self.input_norm * self.gamma) + self.beta
+            
+            # 更新running mean和running variance
+            self.r_mean = self.momentum * self.r_mean + (1 - self.momentum) * mu
+            self.r_var = self.momentum * self.r_var + (1 - self.momentum) * var
+            
+            # 标准化
+            x_norm = (input - mu) / np.sqrt(var + self.eps)
+            self.x_norm = x_norm
+            
+            # 缩放和平移
+            output = self.gamma * x_norm + self.beta
         else:
-            input_norm = (input - self.r_mean[None,:])/np.sqrt(self.r_var[None,:] + self.eps)
-            output = (input_norm * self.gamma[None,:]) + self.beta[None,:]
+            # 测试时使用running statistics
+            x_norm = (input - self.r_mean) / np.sqrt(self.r_var + self.eps)
+            output = self.gamma * x_norm + self.beta
+            
+        # 如果是3D输入，恢复原始形状
+        if len(orig_shape) == 3:
+            output = output.reshape(orig_shape)
+            
         return output
-    '''
-        Backward computationg of batch normalization layer
-        You need to write gradient w.r.t input data, gamma and beta
-        It's recommend to follow the chain rule to firstly compute the gradient w.r.t to intermediate variable to
-        simplify the computation.
 
-        Arguments:
-            grad_output -- numpy array of shape (N, input_channel)
-
-        Output:
-            grad_input -- numpy array of shape (N, input_channel), gradient w.r.t input
-            grad_gamma -- numpy array of shape (input_channel), gradient w.r.t gamma
-            grad_beta  -- numpy array of shape (input_channel), gradient w.r.t beta
-    '''
     def backward(self, grad_output):
         ##########################################################################
         # TODO: YOUR CODE HERE
         ##########################################################################
-        N = grad_output.shape[0]
-        dxdhat = self.gamma[None,:] * grad_output
-        output_term1 =  (1./N) * 1./np.sqrt(self.var + self.eps)
-        output_term2 = N * dxdhat
-        output_term3 = np.sum(dxdhat, axis=0)
-        output_term4 = self.input_norm * np.sum(dxdhat * self.input_norm, axis=0)
-        grad_input = output_term1 * (output_term2 - output_term3 - output_term4)
-        grad_gamma = np.sum(grad_output * self.input_norm, axis = 0)
-        grad_beta = np.sum(grad_output, axis = 0)
+        orig_shape = grad_output.shape
+        if len(orig_shape) == 3:
+            # 如果是3D梯度 (B, L, C)，将其reshape为2D (B*L, C)
+            grad_output = grad_output.reshape(-1, self.input_channel)
+            self.input = self.input.reshape(-1, self.input_channel)
+            
+        N = self.input.shape[0]
+        
+        # 计算beta和gamma的梯度
+        grad_beta = np.sum(grad_output, axis=0)
+        grad_gamma = np.sum(grad_output * self.x_norm, axis=0)
+        
+        # 计算标准化输入的梯度
+        grad_x_norm = grad_output * self.gamma
+        
+        # 计算方差的梯度
+        grad_var = np.sum(grad_x_norm * (self.input - self.mu) * -0.5 * 
+                         (self.var + self.eps)**(-1.5), axis=0)
+        
+        # 计算均值的梯度
+        grad_mu = np.sum(grad_x_norm * -1/np.sqrt(self.var + self.eps), axis=0) + \
+                 grad_var * np.mean(-2 * (self.input - self.mu), axis=0)
+        
+        # 计算输入的梯度
+        grad_input = grad_x_norm / np.sqrt(self.var + self.eps) + \
+                    grad_var * 2 * (self.input - self.mu) / N + \
+                    grad_mu / N
+                    
+        # 如果是3D梯度，恢复原始形状
+        if len(orig_shape) == 3:
+            grad_input = grad_input.reshape(orig_shape)
+        
         return grad_input, grad_gamma, grad_beta
 
 '''
@@ -383,6 +413,31 @@ class Flatten(object):
         return input.reshape(self.inshape[0], -1)
     def backward(self, grad_input):
         return grad_input.reshape(self.inshape)
+
+class GlobalAveragePooling(object):
+    '''
+        Global average pooling layer.
+        Takes average over all spatial dimensions.
+        
+        input tensor: (N, L, C) where:
+            N: batch size
+            L: sequence length (e.g. number of patches)
+            C: number of channels/features
+        output tensor: (N, C)
+    '''
+    def __init__(self):
+        pass
+        
+    def forward(self, x):
+        # x: (B, N, C)
+        self.input_shape = x.shape
+        return np.mean(x, axis=1)  # (B, C)
+        
+    def backward(self, grad_output):
+        # grad_output: (B, C)
+        B, N, C = self.input_shape
+        # 将梯度平均分配给每个位置
+        return np.repeat(grad_output[:, np.newaxis, :], N, axis=1) / N  # (B, N, C)
 
 class BatchNorm2d(BatchNorm1d):
     def __init__(self, input_channel, momentum = 0.9):

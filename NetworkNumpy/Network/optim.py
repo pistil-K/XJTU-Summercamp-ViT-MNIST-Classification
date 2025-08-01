@@ -10,13 +10,18 @@ def list2d_add(a, wa, b, wb):
         # print(len(x), len(y))
         for u, v in zip(x, y):
             # print('\t', u.shape, v.shape)
+            if u.shape != v.shape:
+                print(f"Shape mismatch in add: {u.shape} vs {v.shape}")
             u *= wa
             u += v * wb
+
 def list2d_sub(a, wa, b, wb):
     for x, y in zip(a, b):
         # print(len(x), len(y))
         for u, v in zip(x, y):
             # print('\t', u.shape, v.shape)
+            if u.shape != v.shape:
+                print(f"Shape mismatch in sub: {u.shape} vs {v.shape}")
             u *= wa
             u -= v * wb
 
@@ -35,27 +40,41 @@ class SGD(object):
         # maintains a reference of all trainable params of all layers
         self.params_ref = []
         for l in self.model.layers:
-            # crappy implementation, not my bad
-            if (isinstance(l, L.Linear)):
+            # Get layer type name
+            layer_type = l.__class__.__name__
+            
+            # Handle different layer types
+            if layer_type == 'Linear':
                 self.params_ref.append((l.weight, l.bias))
-            elif (isinstance(l, L.BatchNorm1d)):
+            elif layer_type in ['BatchNorm1d', 'BatchNorm2d']:
                 self.params_ref.append((l.gamma, l.beta))
-            elif (isinstance(l, L.BatchNorm2d)):
-                self.params_ref.append((l.gamma, l.beta))
-            elif (isinstance(l, L.ReLU)):
+            elif layer_type in ['ReLU', 'CrossEntropyLossWithSoftmax', 'MaxPool2d', 'Flatten', 'GlobalAveragePooling']:
                 self.params_ref.append(())
-            elif (isinstance(l, L.CrossEntropyLossWithSoftmax)):
-                self.params_ref.append(())
-            elif (isinstance(l, L.Conv2d)):
+            elif layer_type == 'Conv2d':
                 self.params_ref.append((l.weight, l.bias))
-            elif (isinstance(l, L.MaxPool2d)):
-                self.params_ref.append(())
-            elif (isinstance(l, L.Flatten)):
-                self.params_ref.append(())
-            elif (isinstance(l, L.BasicBlock)):
-                self.params_ref.append(tuple(l.params_ref))
-            elif (isinstance(l, L.BottleNeck)):
-                self.params_ref.append(tuple(l.params_ref))
+            elif layer_type == 'PatchEmbedding':
+                self.params_ref.append((l.proj.weight, l.proj.bias))
+            elif layer_type == 'TransformerBlock':
+                # 收集Transformer块中所有可训练参数
+                params = []
+                # Multi-head attention参数
+                params.extend([
+                    l.attn.q_proj.weight, l.attn.q_proj.bias,
+                    l.attn.k_proj.weight, l.attn.k_proj.bias,
+                    l.attn.v_proj.weight, l.attn.v_proj.bias,
+                    l.attn.out_proj.weight, l.attn.out_proj.bias
+                ])
+                # Batch normalization参数
+                params.extend([l.norm1.gamma, l.norm1.beta])
+                params.extend([l.norm2.gamma, l.norm2.beta])
+                # MLP参数
+                params.extend([
+                    l.mlp.fc1.weight, l.mlp.fc1.bias,
+                    l.mlp.fc2.weight, l.mlp.fc2.bias
+                ])
+                self.params_ref.append(tuple(params))
+            else:
+                raise ValueError(f"Unknown layer type: {layer_type}")
 
     def step(self):
         if (self.momentum > 0. and self.last_step_grads != None):

@@ -1,4 +1,4 @@
-import pylayer as L
+import numpy as np
 
 class Sequential(object):
     '''
@@ -26,7 +26,7 @@ class Sequential(object):
         for l in self.layers[:-1]:
             # print(x.shape)
             # print(type(l))
-            if (type(l) in (L.BatchNorm1d, L.BatchNorm2d, L.BottleNeck, L.BasicBlock)):
+            if hasattr(l, 'train_mode'):  # 检查是否有train_mode参数
                 x = l.forward(x, train_mode)
             else:
                 x = l.forward(x)
@@ -40,12 +40,14 @@ class Sequential(object):
             # print(grad.shape)
             # print(type(l))
             bwd_ret = l.backward(grad)
-            if (isinstance(bwd_ret, tuple)):
+            if isinstance(bwd_ret, tuple):
                 grad = bwd_ret[0]
-                if (len(bwd_ret) > 1): # have trainable params
-                    grads.append(bwd_ret[1:])
-            else: # only grad_input
+                if len(bwd_ret) > 1:  # have trainable params
+                    # 如果返回的是元组，将其转换为列表
+                    grad_params = list(bwd_ret[1])
+                    grads.append(grad_params)
+            else:  # only grad_input
                 grad = bwd_ret
-                grads.append(())
+                grads.append([])
         grads.reverse()
         self.param_grads = grads

@@ -1,7 +1,7 @@
 #%% Preprocess and download datasets
 
 # Variables
-MODEL = 'ResNet18'
+MODEL = 'ViT'
 
 DATASET_PATH = './data/'
 RESULT_PATH = './result_{}/'.format(MODEL)
@@ -9,7 +9,7 @@ RESULT_PATH = './result_{}/'.format(MODEL)
 EPOCHS = 15
 BATCH_SIZE = 64
 
-LR = 1e-7
+LR = 1e-4  # 调整学习率
 MOMENTUM = 0.9
 
 # Import the necessary libraries
@@ -24,15 +24,17 @@ from tqdm import tqdm
 from torchvision import datasets, transforms
 
 # Define a transform to normalize the data
-if MODEL == 'LeNet': # 28x28
-    transform = transforms.Compose([transforms.ToTensor(),
-                                    transforms.Normalize((0.5), (0.5))
-                                    ])
-else: # 224x224
-    transform = transforms.Compose([transforms.ToTensor(),
-                                    transforms.Resize((224, 224)),
-                                    transforms.Normalize((0.5), (0.5))
-                                    ])
+if MODEL in ['LeNet', 'ViT']:  # ViT也使用原始28x28大小
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5), (0.5))
+    ])
+else:  # AlexNet和ResNet使用224x224
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize((224, 224)),
+        transforms.Normalize((0.5), (0.5))
+    ])
 
 # Download and load the training data
 trainset = datasets.MNIST(DATASET_PATH, download = True, train = True, transform = transform)
@@ -45,6 +47,7 @@ from alexnet import AlexNet
 from lenet import LeNet
 from resnet import resnet18
 from optim import SGD
+from vit import ViT
 
 if MODEL == 'LeNet':
     LR = 1e-6
@@ -54,6 +57,11 @@ elif MODEL == 'AlexNet':
 elif MODEL == 'ResNet18':
     LR = 5e-5
     model = resnet18(input_channel=1, output_class=10)
+elif MODEL == 'ViT':
+    LR = 1e-4  # ViT通常需要更大的学习率
+    model = ViT(img_size=28, patch_size=7, in_channels=1, 
+               embed_dim=64, num_heads=8, depth=6, 
+               mlp_ratio=4., num_classes=10)
 else:
     print('No such model {}, please indicate another'.format(MODEL))
 optimizer = SGD(model, lr=LR, momentum=MOMENTUM)
