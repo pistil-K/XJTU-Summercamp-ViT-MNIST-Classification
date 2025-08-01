@@ -368,11 +368,10 @@ class ViT(Sequential):  # 改回继承Sequential
         
         # 最后的线性层使用特殊初始化
         final_linear = L.Linear(embed_dim, num_classes)
-        # 使用较大的初始化范围
-        scale = np.sqrt(2.0 / embed_dim) * 5.0  # 增大5倍
-        final_linear.weight = np.random.randn(embed_dim, num_classes).astype(np.float32) * scale
-        # 初始化偏置为非零值，打破对称性
-        final_linear.bias = np.random.randn(num_classes).astype(np.float32) * 0.1
+        final_linear.weight = np.random.randn(embed_dim, num_classes).astype(np.float32)
+        final_linear.bias = np.zeros(num_classes).astype(np.float32)
+
+    
         layers.append(final_linear)
         
         # 损失层
@@ -396,10 +395,6 @@ class ViT(Sequential):  # 改回继承Sequential
         
         # 最后的线性层
         x = self.layers[-2].forward(x)
-        # 添加BN层来规范化最后的输出
-        x = (x - np.mean(x, axis=1, keepdims=True)) / (np.std(x, axis=1, keepdims=True) + 1e-5)
-        x = x * 1.0  # 缩放因子
-        
         print(f"\nFinal linear layer output range: min={x.min():.4f}, max={x.max():.4f}")
         print(f"Example logits:\n{x[0]}")
         
